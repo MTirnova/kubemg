@@ -98,6 +98,12 @@ type Config struct {
 	// allowed without this, because nothing off-box can intercept it.
 	// `KUBEMG_ALLOW_INSECURE`.
 	AllowInsecureBind bool
+	// MetricsAddr is the host:port of a separate internal listener that serves
+	// only GET /metrics for Prometheus scraping. Empty (the default) disables
+	// it. Bind to a loopback or private address — never to the same address as
+	// KUBEMG_LISTEN_ADDR, which is reachable from agent clusters.
+	// `KUBEMG_METRICS_ADDR`.
+	MetricsAddr string
 }
 
 // Shell configures the browser shell.
@@ -231,6 +237,7 @@ func Load() Config {
 			AgentCABundle: env("KUBEMG_AGENT_CA_BUNDLE", ""),
 		},
 		AllowInsecureBind: envBool("KUBEMG_ALLOW_INSECURE", false),
+		MetricsAddr: env("KUBEMG_METRICS_ADDR", ""),
 	}
 }
 

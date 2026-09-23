@@ -22,6 +22,7 @@ import (
 	"github.com/kubemg/kubemg/backend/pkg/guardrails"
 	"github.com/kubemg/kubemg/backend/pkg/jit"
 	"github.com/kubemg/kubemg/backend/pkg/k8s"
+	"github.com/kubemg/kubemg/backend/pkg/metrics"
 	"github.com/kubemg/kubemg/backend/pkg/observability"
 )
 
@@ -363,6 +364,10 @@ type Options struct {
 	Background context.Context
 	// Logger is where those goroutines report. Defaults to slog's default.
 	Logger *slog.Logger
+	// Metrics is the Prometheus instrumentation handle. When set, a middleware
+	// records per-request HTTP metrics and a /metrics endpoint is exposed for
+	// scraping. Nil leaves the endpoint unregistered, which is what the tests do.
+	Metrics *metrics.Metrics
 }
 
 // tunnels is the slice of the bastion registry the HTTP layer needs: whether a
@@ -454,6 +459,13 @@ func NewRouter(opts Options) *gin.Engine {
 	// Where the caller is, captured once for every route rather than at each of
 	// the dozen places that write an audit record. See pkg/bastion/source.go.
 	router.Use(requestSource())
+
+	if opts.Metrics != nil {
+		// Middleware only — the scrape endpoint lives on a separate internal
+		// listener started in main.go (KUBEMG_METRICS_ADDR), never on this
+		// public-facing router.
+		router.Use(opts.Metrics.Middleware())
+	}
 
 	router.GET("/health", healthHandler)
 

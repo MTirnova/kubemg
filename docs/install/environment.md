@@ -111,6 +111,12 @@ also validated on the way in (1–3650 days) and on the way out.*
 |---|---|---|
 | `KUBEMG_AUDIT_RETENTION_DAYS` | `30` | How long proxied calls (and, by default, session recordings) are kept before the background pruner drops them. |
 
+## Prometheus metrics
+
+| Variable | Default | What it is |
+|---|---|---|
+| `KUBEMG_METRICS_ADDR` | — | `host:port` for a separate internal listener that serves only `GET /metrics` for Prometheus scraping. Unset, the endpoint is not exposed at all. Bind to a loopback or private address (e.g. `127.0.0.1:9090`) — **never** to the same address as `KUBEMG_LISTEN_ADDR`, which is reachable from agent clusters. See [Prometheus metrics](metrics.md). |
+
 ## CORS
 
 | Variable | Default | What it is |
