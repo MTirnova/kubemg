@@ -274,7 +274,7 @@ func (s *server) startShell(c *gin.Context) {
 	// derived from the user id, so anyone able to create pods in the agent's
 	// namespace could have put one there to be handed its owner's kubeconfig.
 	if status.Exists && (status.Phase == "Succeeded" || status.Phase == "Failed" || status.ForeignFor(config.Image) != "") {
-		if err := s.deleteShellPod(ctx, cluster, config.Namespace, user.ID); err != nil {
+		if err := s.deleteShellPod(ctx, cluster, config.Namespace, user.ID, true); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
@@ -357,7 +357,7 @@ func (s *server) stopShell(c *gin.Context) {
 	// Read before deleting, so the register row this shell was holding is known:
 	// a pod that is already gone cannot say what was inside it.
 	status, _ := s.readShellPod(ctx, cluster, config.Namespace, user.ID)
-	if err := s.deleteShellPod(ctx, cluster, config.Namespace, user.ID); err != nil {
+	if err := s.deleteShellPod(ctx, cluster, config.Namespace, user.ID, false); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -548,11 +548,11 @@ func seedRefusal(err error) string {
 // deleteShellPod removes it. A pod that is already gone is a success: the caller
 // asked for there to be no shell, and there is none.
 func (s *server) deleteShellPod(
-	ctx context.Context, cluster *db.Cluster, namespace string, userID uint,
+	ctx context.Context, cluster *db.Cluster, namespace string, userID uint, replacing bool,
 ) error {
 	user, grant := shellRunner(cluster.ID)
 	resp, err := s.proxy.Call(ctx, user, cluster, grant,
-		http.MethodDelete, shellPodPath(namespace, userID)+"?propagationPolicy=Background", nil, nil)
+		http.MethodDelete, shellDeletePath(namespace, userID, replacing), nil, nil)
 	if err != nil {
 		return shellCallError(err, "could not delete the shell pod")
 	}
@@ -563,6 +563,25 @@ func (s *server) deleteShellPod(
 		return errors.New(kubeErrorMessage(resp.Body, resp.Status))
 	}
 	return nil
+}
+
+// replaceGracePeriod is how long a pod being replaced is given to stop. The
+// pod's own grace period is not honoured there: a finished shell has nothing
+// left running, and a pod KubeMG did not render chose its own (30 seconds by
+// default, any length by design) — longer than the start waits, which turned
+// every replacement into a refusal and a second click. One second rather than
+// zero, so the kubelet still stops the containers instead of the API server
+// forgetting a pod that is still running.
+const replaceGracePeriod = 1
+
+// shellDeletePath is the DELETE that clears the shell's name. Ending a shell
+// leaves the pod its rendered grace period; replacing one does not wait on it.
+func shellDeletePath(namespace string, userID uint, replacing bool) string {
+	path := shellPodPath(namespace, userID) + "?propagationPolicy=Background"
+	if replacing {
+		path += "&gracePeriodSeconds=" + strconv.Itoa(replaceGracePeriod)
+	}
+	return path
 }
 
 // touchShellPod moves the idle clock forward. A failure is logged and dropped:
