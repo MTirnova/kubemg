@@ -141,6 +141,8 @@ type Proxy struct {
 	// clientUpgrader accepts the browser terminal's / kubectl's WebSocket, built
 	// once with this server's origin allowlist. See newClientUpgrader.
 	clientUpgrader websocket.Upgrader
+	// agentNS is where the agent runs; see agentns.go.
+	agentNS agentNamespaces
 }
 
 // ProxyOptions wires the proxy handler.
@@ -175,6 +177,10 @@ type ProxyOptions struct {
 	// got.
 	AllowedOrigins []string
 	PublicURL      string
+	// AgentNamespaces is where the agent is installed, refused to every grant
+	// below cluster-admin (see agentns.go). The API layer republishes it from
+	// the settings with SetAgentNamespaces.
+	AgentNamespaces []string
 }
 
 // NewProxy builds the kubectl proxy handler.
@@ -191,7 +197,7 @@ func NewProxy(opts ProxyOptions) *Proxy {
 	if registry == nil {
 		registry = NewRegistry()
 	}
-	return &Proxy{
+	proxy := &Proxy{
 		store:          opts.Store,
 		registry:       registry,
 		auditor:        auditor,
@@ -202,6 +208,8 @@ func NewProxy(opts ProxyOptions) *Proxy {
 		limiter:        opts.RateLimit,
 		clientUpgrader: newClientUpgrader(buildOriginAllowlist(opts.AllowedOrigins, opts.PublicURL)),
 	}
+	proxy.agentNS.store(opts.AgentNamespaces)
+	return proxy
 }
 
 // buildOriginAllowlist mirrors api.server.consoleOrigins: a wildcard CORS entry
@@ -291,6 +299,16 @@ func (p *Proxy) Handle(c *gin.Context) {
 		return
 	}
 	if allowed, reason := allowedPath(grant, c.Request.Method, parsed, path); !allowed {
+		event.RefusedBy = RefusedByKubeMG
+		p.fail(c, &event, http.StatusForbidden, reason)
+		return
+	}
+	if reason := p.agentNamespaceRefusal(user, grant, parsed); reason != "" {
+		event.RefusedBy = RefusedByKubeMG
+		p.fail(c, &event, http.StatusForbidden, reason)
+		return
+	}
+	if reason := clusterWideSecretRefusal(user, grant, parsed); reason != "" {
 		event.RefusedBy = RefusedByKubeMG
 		p.fail(c, &event, http.StatusForbidden, reason)
 		return
@@ -478,6 +496,11 @@ func (p *Proxy) CallWithHeader(
 		record(http.StatusForbidden, err)
 		return nil, &CallError{Status: http.StatusForbidden, Message: reason}
 	}
+	if reason := p.agentNamespaceRefusal(user, grant, parsed); reason != "" {
+		event.RefusedBy = RefusedByKubeMG
+		record(http.StatusForbidden, errors.New(reason))
+		return nil, &CallError{Status: http.StatusForbidden, Message: reason}
+	}
 
 	// The same policies apply to a read the console makes on a user's behalf. A
 	// guardrail that only covered kubectl would be a control the UI walks around,
@@ -615,6 +638,11 @@ func (p *Proxy) Watch(
 		err := errors.New(reason)
 		event.RefusedBy = RefusedByKubeMG
 		record(http.StatusForbidden, err)
+		return nil, &CallError{Status: http.StatusForbidden, Message: reason}
+	}
+	if reason := p.agentNamespaceRefusal(user, grant, parsed); reason != "" {
+		event.RefusedBy = RefusedByKubeMG
+		record(http.StatusForbidden, errors.New(reason))
 		return nil, &CallError{Status: http.StatusForbidden, Message: reason}
 	}
 
