@@ -106,7 +106,7 @@ any other cluster. See [a stolen kubeconfig](threat-model.md#a-leaked-kubeconfig
 | Part of a grant | Enforced by |
 | --- | --- |
 | Role (`view`/`edit`/`cluster-admin`) | The cluster's own RBAC, not re-checked locally |
-| Namespace scope | The proxy. A scoped grant is refused on a request that names no namespace or one outside its list, discovery paths excepted |
+| Namespace scope | The proxy. A scoped grant is refused on a request that names no namespace or one outside its list, discovery reads excepted. A path the API server would decode differently (percent escapes, dot or empty segments) is refused for every grant |
 
 ## The direct-mode gap, stated plainly
 

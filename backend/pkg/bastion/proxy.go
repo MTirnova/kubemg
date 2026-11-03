@@ -249,6 +249,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	if path == "" {
 		path = "/"
 	}
+	delimiter := decodedDelimiter(path)
 	// The in-page terminal authenticates with a query parameter because a
 	// browser cannot set headers on a WebSocket. Strip it here so the session
 	// token reaches neither the target cluster nor the audit trail.
@@ -284,7 +285,12 @@ func (p *Proxy) Handle(c *gin.Context) {
 		return
 	}
 
-	if allowed, reason := allowedNamespace(grant, parsed, path); !allowed {
+	if delimiter != "" {
+		event.RefusedBy = RefusedByKubeMG
+		p.fail(c, &event, http.StatusForbidden, delimiter)
+		return
+	}
+	if allowed, reason := allowedPath(grant, c.Request.Method, parsed, path); !allowed {
 		event.RefusedBy = RefusedByKubeMG
 		p.fail(c, &event, http.StatusForbidden, reason)
 		return
@@ -466,7 +472,7 @@ func (p *Proxy) CallWithHeader(
 		p.auditor.Record(ctx, event)
 	}
 
-	if allowed, reason := allowedNamespace(grant, parsed, path); !allowed {
+	if allowed, reason := allowedPath(grant, method, parsed, path); !allowed {
 		err := errors.New(reason)
 		event.RefusedBy = RefusedByKubeMG
 		record(http.StatusForbidden, err)
@@ -605,7 +611,7 @@ func (p *Proxy) Watch(
 		p.auditor.Record(ctx, event)
 	}
 
-	if allowed, reason := allowedNamespace(grant, parsed, path); !allowed {
+	if allowed, reason := allowedPath(grant, http.MethodGet, parsed, path); !allowed {
 		err := errors.New(reason)
 		event.RefusedBy = RefusedByKubeMG
 		record(http.StatusForbidden, err)
@@ -904,17 +910,26 @@ func forwardHeaders(src http.Header, user *db.User, grant db.UserClusterAccess) 
 	return out
 }
 
-// allowedNamespace enforces the namespace scope attached to a grant. An
-// unscoped grant allows everything the impersonated role allows; a scoped grant
-// refuses anything that does not name one of its namespaces, including
-// cluster-wide reads, because a cluster-wide list would return objects from
-// namespaces the grant does not cover.
-func allowedNamespace(grant db.UserClusterAccess, parsed APIPath, path string) (bool, string) {
+// allowedPath decides whether a call may go down the tunnel at all, before
+// any policy reads it.
+//
+// First the path has to mean the same thing here as it will to the API server
+// (ambiguousPath) — for every grant, scoped or not, because everything after
+// this reads ParsePath's answer. Then the namespace scope attached to the
+// grant: an unscoped grant allows everything the impersonated role allows; a
+// scoped grant refuses anything that does not name one of its namespaces,
+// including cluster-wide reads, because a cluster-wide list would return
+// objects from namespaces the grant does not cover. Discovery is the one
+// exception, and only for reading.
+func allowedPath(grant db.UserClusterAccess, method string, parsed APIPath, path string) (bool, string) {
+	if reason := ambiguousPath(path); reason != "" {
+		return false, reason
+	}
 	allowed := grant.NamespaceList()
 	if len(allowed) == 0 {
 		return true, ""
 	}
-	if isDiscovery(path) {
+	if readOnlyMethod(method) && isDiscovery(path) {
 		return true, ""
 	}
 	if parsed.Namespace == "" {

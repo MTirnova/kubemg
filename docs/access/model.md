@@ -74,7 +74,7 @@ If you bound a RoleBinding to a kubemg username directly (`kind: User, name: ada
 
 ## Where namespace scope is enforced
 
-Impersonation cannot express "only these namespaces", so the proxy enforces it: a scoped grant refuses any call naming a namespace outside its list. Discovery paths and cluster-scoped kinds are exempt (there is no namespace to check). A resource list for a scoped grant is answered by reading each granted namespace and merging the results, never by listing the whole cluster and filtering, so a scoped user cannot learn which other namespaces exist.
+Impersonation cannot express "only these namespaces", so the proxy enforces it: a scoped grant refuses any call naming a namespace outside its list. Discovery paths are exempt for reading only (kubectl cannot resolve anything without them); a cluster-scoped call is refused, because there is no namespace to check. Whatever the grant, the proxy also refuses a path the cluster would read differently from KubeMG — one still carrying a percent-encoded character, a `.` or `..` segment, or an empty segment — because the API server decodes the path once more before it routes. No Kubernetes object name needs any of these. A resource list for a scoped grant is answered by reading each granted namespace and merging the results, never by listing the whole cluster and filtering, so a scoped user cannot learn which other namespaces exist.
 
 ## What each role can do
 
