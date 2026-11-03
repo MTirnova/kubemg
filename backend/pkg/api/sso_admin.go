@@ -547,10 +547,8 @@ func (s *server) applyMappingRequest(
 			return errors.New("could not verify the local group")
 		}
 	}
-	for _, namespace := range req.Namespaces {
-		if strings.ContainsAny(namespace, " ,") {
-			return fmt.Errorf("%q is not a valid namespace name", namespace)
-		}
+	if err := db.CheckNamespaces(req.Namespaces); err != nil {
+		return err
 	}
 	if req.TargetK8sRole != "" &&
 		!slices.Contains([]string{db.K8sRoleView, db.K8sRoleEdit, db.K8sRoleClusterAdmin}, req.TargetK8sRole) {
