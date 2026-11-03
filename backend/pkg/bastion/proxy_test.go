@@ -81,13 +81,30 @@ func TestAllowedNamespace(t *testing.T) {
 		{"group discovery", scoped, "/apis/apps/v1", true},
 		{"version", scoped, "/version", true},
 		{"openapi", scoped, "/openapi/v2", true},
+		// Discovery is let past the scope for reading only.
+		{"write to a discovery path", scoped, "/apis/apps/v1", false},
+		// Whatever the grant, a path the API server would read differently is
+		// refused before anything else reads it.
+		{"double-encoded slash, scoped", scoped, "/api/v1%2Fnamespaces%2Fkube-system%2Fsecrets", false},
+		{"double-encoded slash, unscoped", unscoped, "/api/v1/namespaces/team-a%2F..%2Fkube-system/secrets", false},
+		{"encoded namespace", unscoped, "/api/v1/namespaces/kubemg%2Dsystem/secrets", false},
+		{"dot segments", scoped, "/api/v1/namespaces/team-a/pods/../../kube-system/pods", false},
+		{"empty segment", unscoped, "/api/v1/namespaces//pods", false},
+		{"trailing slash on discovery", scoped, "/apis/", true},
+		// Past a proxy subresource the path is the proxied service's.
+		{"service proxy tail", scoped, "/api/v1/namespaces/team-a/services/http:web:80/proxy/a%2Fb", true},
+		{"encoded service proxy head", scoped, "/api/v1/namespaces/team-a/services/http:web%3A80/proxy/", false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := allowedNamespace(tc.grant, ParsePath(tc.path), tc.path)
+			method := http.MethodGet
+			if strings.HasPrefix(tc.name, "write") {
+				method = http.MethodPost
+			}
+			got, reason := allowedPath(tc.grant, method, ParsePath(tc.path), tc.path)
 			if got != tc.want {
-				t.Fatalf("allowedNamespace(%q) = %v (%s), want %v", tc.path, got, reason, tc.want)
+				t.Fatalf("allowedPath(%s %q) = %v (%s), want %v", method, tc.path, got, reason, tc.want)
 			}
 			if !got && reason == "" {
 				t.Fatal("a refusal must explain itself")
@@ -287,5 +304,38 @@ func TestImpersonationUserPrefixesEveryAccount(t *testing.T) {
 				t.Fatalf("ImpersonationUser(%q, id %d) = %q, want %q", tc.user.Username, tc.user.ID, got, tc.want)
 			}
 		})
+	}
+}
+
+// A namespace-scoped caller must not reach another namespace by encoding the
+// slashes twice: the gateway decodes once, the API server once more. The call
+// is refused before the agent is asked anything, and the refusal is recorded.
+func TestProxyRefusesADoubleEncodedPath(t *testing.T) {
+	h := newHarness(t)
+	h.addCluster(1, "prod-eu", "kmg_valid")
+	dev := h.addUser(11, "dev", db.SystemRoleUser)
+	h.grant(dev.ID, 1, db.K8sRoleEdit, []string{"team-a"})
+
+	agent, err := h.dialAgent("kmg_valid", okResponse("{}"))
+	if err != nil {
+		t.Fatalf("dial agent: %v", err)
+	}
+	waitFor(t, func() bool { return h.gateway.Registry().Connected(1) })
+
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		resp := h.proxyRequest(method,
+			"/api/v1/clusters/1/proxy/api/v1%252Fnamespaces%252Fkube-system%252Fsecrets", h.token(dev))
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: want 403, got %d", method, resp.StatusCode)
+		}
+	}
+	if got := len(agent.requests()); got != 0 {
+		t.Fatalf("the call must never reach the agent, got %d requests", got)
+	}
+	waitFor(t, func() bool { return len(h.audit.events()) >= 2 })
+	for _, event := range h.audit.events() {
+		if event.RefusedBy != RefusedByKubeMG || event.Status != http.StatusForbidden {
+			t.Fatalf("want a refusal by kubemg, got %+v", event)
+		}
 	}
 }
