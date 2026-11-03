@@ -95,7 +95,7 @@ In direct mode kubemg mints a token but binds no RBAC to it, so the permission m
 
 ## Disabled accounts
 
-Disabling an account takes effect immediately, not when its session token expires. Every request re-reads the account and a disabled one gets `403 this account is disabled`. A machine token stops at its next call too.
+Disabling an account takes effect immediately, not when its session token expires. Every request re-reads the account and a disabled one gets `403 this account is disabled`. A machine token stops at its next call too. Demoting an administrator works the same way: an admin route reads the role from the account, not from the session token, so a demoted administrator's existing session loses the admin routes at its next request.
 
 ## Self-protection rules
 
