@@ -748,7 +748,11 @@ func NewRouter(opts Options) *gin.Engine {
 	// A console session whose password is due reaches only the routes that
 	// change it; see password_policy.go.
 	requireAuth := auth.RequireAuthGated(s.jwt, newMachineTokenVerifier(s.store), s.gatePasswordAge)
-	requireAdmin := auth.RequireRole(db.RoleAdmin)
+	// The role is read from the account, not from the token: a token carries
+	// the role it was minted with for its whole lifetime, and an administrator
+	// who was demoted or disabled must lose the console's admin routes now,
+	// not when that token runs out.
+	requireAdmin := s.requireAdmin
 
 	if opts.Bastion != nil {
 		// Agents authenticate on their own registration token, so this route
