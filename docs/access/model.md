@@ -74,6 +74,8 @@ If you bound a RoleBinding to a kubemg username directly (`kind: User, name: ada
 
 ## Where namespace scope is enforced
 
+A grant, a JIT request or an SSO mapping is refused if any namespace it names is not a Kubernetes namespace name (lowercase letters, digits and `-`, at most 63 characters): those names are written into the metrics and log queries kubemg runs for a scoped caller. A grant stored before this check that names something else makes those charts and searches refuse for that caller until an administrator corrects it.
+
 Impersonation cannot express "only these namespaces", so the proxy enforces it: a scoped grant refuses any call naming a namespace outside its list. Discovery paths and cluster-scoped kinds are exempt (there is no namespace to check). A resource list for a scoped grant is answered by reading each granted namespace and merging the results, never by listing the whole cluster and filtering, so a scoped user cannot learn which other namespaces exist.
 
 ## What each role can do

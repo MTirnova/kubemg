@@ -599,3 +599,25 @@ func TestUsernamesKubernetesReadsAsItsOwnAreRefused(t *testing.T) {
 		t.Fatalf("an email-shaped username should be accepted, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+// A grant's namespaces are pasted into the PromQL and LogsQL KubeMG writes for
+// a scoped caller, so only real namespace names are stored.
+func TestAssignPermissionRefusesANamespaceThatIsNotOne(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.store.addUser("admin", "pw", db.RoleAdmin)
+	target := env.store.addUser("devops", "pw", db.RoleUser)
+	cluster := env.store.addCluster("dev-eu", db.EnvDev)
+
+	for _, namespace := range []string{"[a-z0-9-]+", `a"b`, "team a", "UPPER", strings.Repeat("a", 64)} {
+		rec := env.do(t, http.MethodPost, "/api/v1/permissions/assign", env.tokenFor(t, admin), map[string]any{
+			"subject_type": "user",
+			"subject_id":   target.ID,
+			"cluster_id":   cluster.ID,
+			"k8s_role":     db.K8sRoleView,
+			"namespaces":   []string{"team-a", namespace},
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%q: want 400, got %d (%s)", namespace, rec.Code, rec.Body.String())
+		}
+	}
+}
