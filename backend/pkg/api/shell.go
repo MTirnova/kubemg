@@ -273,7 +273,7 @@ func (s *server) startShell(c *gin.Context) {
 	// So is a pod under the shell's name that KubeMG did not render: the name is
 	// derived from the user id, so anyone able to create pods in the agent's
 	// namespace could have put one there to be handed its owner's kubeconfig.
-	if status.Exists && (status.Phase == "Succeeded" || status.Phase == "Failed" || status.Foreign != "") {
+	if status.Exists && (status.Phase == "Succeeded" || status.Phase == "Failed" || status.ForeignFor(config.Image) != "") {
 		if err := s.deleteShellPod(ctx, cluster, config.Namespace, user.ID); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
@@ -318,12 +318,7 @@ func (s *server) startShell(c *gin.Context) {
 		Status:             status,
 	}
 
-	if status.Foreign != "" {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": "the pod under this shell's name is not one KubeMG made (" + status.Foreign +
-				"), so no credential is written into it; a cluster administrator should look at " +
-				config.Namespace + "/" + status.Name,
-		})
+	if refuseForeignShell(c, status, config) {
 		return
 	}
 	if status.Ready {
@@ -333,6 +328,21 @@ func (s *server) startShell(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+// refuseForeignShell answers 409 for a pod under the shell's name that KubeMG
+// did not render, and reports whether it did.
+func refuseForeignShell(c *gin.Context, status shell.Status, config shellConfig) bool {
+	reason := status.ForeignFor(config.Image)
+	if reason == "" {
+		return false
+	}
+	c.JSON(http.StatusConflict, gin.H{
+		"error": "the pod under this shell's name is not one KubeMG made (" + reason +
+			"), so nothing is written into it or attached to it; a cluster administrator should look at " +
+			config.Namespace + "/" + status.Name,
+	})
+	return true
 }
 
 // stopShell ends the caller's shell now, and withdraws the credential that was
@@ -376,6 +386,11 @@ func (s *server) attachShell(c *gin.Context) {
 	}
 	if !status.Exists || !status.Ready {
 		c.JSON(http.StatusConflict, gin.H{"error": "no shell is running; start one first"})
+		return
+	}
+	// What is typed into a terminal is as much the person's as the credential
+	// is, so a pod KubeMG did not render is not attached to either.
+	if refuseForeignShell(c, status, config) {
 		return
 	}
 

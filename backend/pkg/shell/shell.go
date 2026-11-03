@@ -509,11 +509,13 @@ var shellCommand = []string{"/bin/sh", "-c", "while :; do sleep 3600; done"}
 
 // foreignSpec checks the parts of a pod that decide who can read what is
 // written into it: the container the credential is exec'd into must run
-// KubeMG's command under KubeMG's ServiceAccount with no token mounted, and
-// no other container may see its home directory or its processes. Anything
-// the cluster's admission adds beside that — a mesh sidecar, an extra volume
-// — is left alone, because it cannot reach the file. The image is compared
-// by the caller, which knows which one is configured.
+// KubeMG's command under KubeMG's ServiceAccount with no token mounted, with
+// exactly the two scratch mounts PodManifest gives it, and nothing else in the
+// pod may see its home directory, its processes or the node's disk (where an
+// emptyDir lives). Anything the cluster's admission adds beside that — a mesh
+// sidecar with its own volumes — is left alone, because it cannot reach the
+// file. The image is compared by ForeignFor, which knows which one is
+// configured.
 func foreignSpec(spec map[string]any) string {
 	if account, _ := spec["serviceAccountName"].(string); account != ServiceAccount {
 		return "it runs under another service account"
@@ -526,30 +528,32 @@ func foreignSpec(spec map[string]any) string {
 			return "it shares " + field + " with something else"
 		}
 	}
-	if volumes, ok := spec["volumes"].([]any); ok {
-		for _, raw := range volumes {
-			volume, _ := raw.(map[string]any)
-			if name, _ := volume["name"].(string); name == "home" {
-				if _, ok := volume["emptyDir"].(map[string]any); !ok {
-					return "its home directory is not an emptyDir"
-				}
+	if ephemeral, _ := spec["ephemeralContainers"].([]any); len(ephemeral) > 0 {
+		return "it has an ephemeral container attached"
+	}
+	volumes, _ := spec["volumes"].([]any)
+	for _, raw := range volumes {
+		volume, _ := raw.(map[string]any)
+		if _, ok := volume["hostPath"]; ok {
+			return "it mounts a path from the node"
+		}
+		if name, _ := volume["name"].(string); name == "home" || name == "tmp" {
+			if _, ok := volume["emptyDir"].(map[string]any); !ok {
+				return "its " + name + " volume is not an emptyDir"
 			}
 		}
 	}
 
 	found := false
-	for _, list := range []string{"initContainers", "containers", "ephemeralContainers"} {
+	for _, list := range []string{"initContainers", "containers"} {
 		containers, _ := spec[list].([]any)
 		for _, raw := range containers {
 			container, _ := raw.(map[string]any)
 			name, _ := container["name"].(string)
 			if list == "containers" && name == "shell" {
 				found = true
-				if !sameArgv(container["command"], shellCommand) {
-					return "its shell container runs another command"
-				}
-				if args, ok := container["args"].([]any); ok && len(args) > 0 {
-					return "its shell container runs another command"
+				if reason := foreignShellContainer(container); reason != "" {
+					return reason
 				}
 				continue
 			}
@@ -564,6 +568,47 @@ func foreignSpec(spec map[string]any) string {
 	}
 	if !found {
 		return "it has no shell container"
+	}
+	return ""
+}
+
+// foreignShellContainer checks the container itself: KubeMG's command, no
+// arguments, and its two scratch mounts exactly where PodManifest put them.
+func foreignShellContainer(container map[string]any) string {
+	if !sameArgv(container["command"], shellCommand) {
+		return "its shell container runs another command"
+	}
+	if args, ok := container["args"].([]any); ok && len(args) > 0 {
+		return "its shell container runs another command"
+	}
+	want := map[string]string{"home": HomeDir, "tmp": "/tmp"}
+	mounts, _ := container["volumeMounts"].([]any)
+	if len(mounts) != len(want) {
+		return "its shell container mounts something else"
+	}
+	for _, raw := range mounts {
+		mount, _ := raw.(map[string]any)
+		name, _ := mount["name"].(string)
+		path, _ := mount["mountPath"].(string)
+		if expected, ok := want[name]; !ok || path != expected {
+			return "its shell container mounts something else"
+		}
+		delete(want, name)
+	}
+	return ""
+}
+
+// ForeignFor is Foreign with the configured image compared too: a pod running
+// another image runs another `head`, and that is what reads the credential.
+func (s Status) ForeignFor(image string) string {
+	if !s.Exists {
+		return ""
+	}
+	if s.Foreign != "" {
+		return s.Foreign
+	}
+	if s.Image != image {
+		return "it runs another image"
 	}
 	return ""
 }

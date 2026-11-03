@@ -444,8 +444,11 @@ func (s *server) publishRateLimit(ctx context.Context) {
 
 // publishAgentNamespaces tells the gateway where the agent runs, so a call
 // into that namespace is refused below cluster-admin (bastion/agentns.go). The
-// boot default rides along with the setting: an agent installed before the
-// setting changed is still in the old namespace, holding its credential.
+// boot default and the package's own default ride along with the setting: an
+// agent installed before the setting changed is still in the old namespace,
+// holding its credential. (Where each agent actually runs is not reported by
+// the agent today; a namespace an operator used once and moved off twice is
+// not remembered.)
 //
 // A failed settings read keeps what was published, as publishRateLimit does:
 // s.settings would answer the boot default alone, and an outage must not
@@ -457,7 +460,7 @@ func (s *server) publishAgentNamespaces(ctx context.Context) {
 	if _, err := s.store.Settings(ctx); err != nil {
 		return
 	}
-	s.proxy.SetAgentNamespaces(s.settings(ctx).AgentNamespace, s.agentNamespace)
+	s.proxy.SetAgentNamespaces(s.settings(ctx).AgentNamespace, s.agentNamespace, agentpkg.DefaultNamespace)
 }
 
 // storedRetentionDays reads the audit retention override. A value that is not a

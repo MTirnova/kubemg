@@ -412,8 +412,14 @@ func TestReadStatusTellsAForeignPodFromItsOwn(t *testing.T) {
 		}
 		return pod
 	}
-	if got := ReadStatus(render()).Foreign; got != "" {
+	if got := ReadStatus(render()).ForeignFor("shell:1"); got != "" {
 		t.Fatalf("the rendered pod read as foreign: %s", got)
+	}
+	if ReadStatus(render()).ForeignFor("shell:2") == "" {
+		t.Fatal("a pod running another image read as KubeMG's own")
+	}
+	if got := (Status{}).ForeignFor("shell:1"); got != "" {
+		t.Fatalf("no pod at all read as foreign: %s", got)
 	}
 
 	// A mesh sidecar that cannot see the home directory changes nothing.
@@ -446,6 +452,23 @@ func TestReadStatusTellsAForeignPodFromItsOwn(t *testing.T) {
 		},
 		"no shell container": func(spec map[string]any) {
 			spec["containers"].([]any)[0].(map[string]any)["name"] = "other"
+		},
+		"ephemeral container": func(spec map[string]any) {
+			spec["ephemeralContainers"] = []any{map[string]any{"name": "debug", "targetContainerName": "shell"}}
+		},
+		"node path elsewhere": func(spec map[string]any) {
+			spec["volumes"] = append(spec["volumes"].([]any), map[string]any{
+				"name": "kubelet", "hostPath": map[string]any{"path": "/var/lib/kubelet"},
+			})
+		},
+		"extra mount in the shell": func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["volumeMounts"] = append(container["volumeMounts"].([]any),
+				map[string]any{"name": "loot", "mountPath": HomeDir + "/.kube"})
+		},
+		"home mounted elsewhere": func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["volumeMounts"].([]any)[0] = map[string]any{"name": "home", "mountPath": "/elsewhere"}
 		},
 	}
 	for name, mutate := range cases {

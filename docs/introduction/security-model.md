@@ -123,18 +123,20 @@ no way to carve one namespace out of a ClusterRoleBinding, so the proxy does
 it:
 
 - Any call naming the agent's namespace is refused for a `view` or `edit`
-  grant, kubectl and console alike. The namespace is the **Agent namespace**
-  setting, plus the `KUBEMG_AGENT_NAMESPACE` the server started with, so an
-  agent installed before the setting changed stays covered.
+  grant, kubectl and console alike.
 - A kubectl read of every Secret in the cluster (`kubectl get secrets -A`) is
   refused below `cluster-admin`, because its answer would carry the agent's
   Secret. Read Secrets one namespace at a time. The console's own Secret list
   is not affected: it shows key names only.
-- A browser shell is only seeded into a pod kubemg rendered. A pod under the
-  shell's name that runs another command, another ServiceAccount, a mounted
-  token, shared process or host namespaces, or lets another container see its
-  home directory is replaced; if the replacement still is not kubemg's, the
-  shell refuses rather than writing the credential into it.
+- A browser shell is only seeded into, and attached to, a pod kubemg
+  rendered. A pod under the shell's name that runs another image or command,
+  another ServiceAccount, a mounted token, shared process or host namespaces, a
+  node path, an ephemeral container, or lets another container see its home
+  directory is replaced; if the replacement still is not kubemg's, the shell
+  refuses rather than writing the credential into it.
+- The guarded namespaces are the setting, the boot value and the default
+  `kubemg-system`. An agent moved by hand to a namespace none of those name is
+  not covered; keep the **Agent namespace** setting pointing where agents run.
 
 ## The direct-mode gap, stated plainly
 
