@@ -371,9 +371,12 @@ func ReadStatus(pod map[string]any) Status {
 	}
 
 	spec, _ := pod["spec"].(map[string]any)
-	if containers, ok := spec["containers"].([]any); ok && len(containers) > 0 {
-		if first, ok := containers[0].(map[string]any); ok {
-			status.Image, _ = first["image"].(string)
+	if containers, ok := spec["containers"].([]any); ok {
+		for _, raw := range containers {
+			if container, ok := raw.(map[string]any); ok && container["name"] == "shell" {
+				status.Image, _ = container["image"].(string)
+				break
+			}
 		}
 	}
 
@@ -507,15 +510,18 @@ func ClampMaxLifetime(d time.Duration) time.Duration {
 // shellCommand is the container's command as PodManifest writes it.
 var shellCommand = []string{"/bin/sh", "-c", "while :; do sleep 3600; done"}
 
-// foreignSpec checks the parts of a pod that decide who can read what is
-// written into it: the container the credential is exec'd into must run
-// KubeMG's command under KubeMG's ServiceAccount with no token mounted, with
-// exactly the two scratch mounts PodManifest gives it, and nothing else in the
-// pod may see its home directory, its processes or the node's disk (where an
-// emptyDir lives). Anything the cluster's admission adds beside that — a mesh
-// sidecar with its own volumes — is left alone, because it cannot reach the
-// file. The image is compared by ForeignFor, which knows which one is
-// configured.
+// foreignSpec compares a pod with the one PodManifest renders, on every field
+// that decides who can read or change what is written into it. It is an
+// allowlist on purpose: a pod is KubeMG's when nothing in it departs from the
+// rendered shape, not when it avoids a list of known tricks. One container,
+// named shell, running KubeMG's command with exactly KubeMG's environment and
+// two scratch mounts; only emptyDir volumes; no init or ephemeral container;
+// KubeMG's ServiceAccount with no token; no shared process or host namespace;
+// nothing privileged and no capability added. Fields the API server defaults
+// (terminationMessagePath, imagePullPolicy, …) are not compared. A cluster
+// that injects a sidecar into the agent's namespace makes every shell foreign,
+// and the shell says so rather than seeding a pod it cannot vouch for. The
+// image is compared by ForeignFor, which knows which one is configured.
 func foreignSpec(spec map[string]any) string {
 	if account, _ := spec["serviceAccountName"].(string); account != ServiceAccount {
 		return "it runs under another service account"
@@ -528,59 +534,50 @@ func foreignSpec(spec map[string]any) string {
 			return "it shares " + field + " with something else"
 		}
 	}
-	if ephemeral, _ := spec["ephemeralContainers"].([]any); len(ephemeral) > 0 {
-		return "it has an ephemeral container attached"
-	}
-	volumes, _ := spec["volumes"].([]any)
-	for _, raw := range volumes {
-		volume, _ := raw.(map[string]any)
-		if _, ok := volume["hostPath"]; ok {
-			return "it mounts a path from the node"
-		}
-		if name, _ := volume["name"].(string); name == "home" || name == "tmp" {
-			if _, ok := volume["emptyDir"].(map[string]any); !ok {
-				return "its " + name + " volume is not an emptyDir"
-			}
+	for _, field := range []string{"initContainers", "ephemeralContainers"} {
+		if extra, _ := spec[field].([]any); len(extra) > 0 {
+			return "it has containers KubeMG did not put there"
 		}
 	}
-
-	found := false
-	for _, list := range []string{"initContainers", "containers"} {
-		containers, _ := spec[list].([]any)
-		for _, raw := range containers {
-			container, _ := raw.(map[string]any)
-			name, _ := container["name"].(string)
-			if list == "containers" && name == "shell" {
-				found = true
-				if reason := foreignShellContainer(container); reason != "" {
-					return reason
-				}
-				continue
-			}
-			mounts, _ := container["volumeMounts"].([]any)
-			for _, rawMount := range mounts {
-				mount, _ := rawMount.(map[string]any)
-				if volume, _ := mount["name"].(string); volume == "home" {
-					return "another container mounts its home directory"
-				}
-			}
-		}
+	containers, _ := spec["containers"].([]any)
+	if len(containers) != 1 {
+		return "it has containers KubeMG did not put there"
 	}
-	if !found {
+	container, _ := containers[0].(map[string]any)
+	if name, _ := container["name"].(string); name != "shell" {
 		return "it has no shell container"
 	}
-	return ""
+
+	volumes, _ := spec["volumes"].([]any)
+	seen := map[string]bool{}
+	for _, raw := range volumes {
+		volume, _ := raw.(map[string]any)
+		name, _ := volume["name"].(string)
+		if _, ok := volume["emptyDir"].(map[string]any); !ok || len(volume) != 2 {
+			return "its " + name + " volume is not a scratch directory"
+		}
+		seen[name] = true
+	}
+	if len(seen) != 2 || !seen["home"] || !seen["tmp"] {
+		return "its volumes are not the two KubeMG gives it"
+	}
+	return foreignShellContainer(container)
 }
 
-// foreignShellContainer checks the container itself: KubeMG's command, no
-// arguments, and its two scratch mounts exactly where PodManifest put them.
+// foreignShellContainer checks the container itself against PodManifest's.
 func foreignShellContainer(container map[string]any) string {
 	if !sameArgv(container["command"], shellCommand) {
 		return "its shell container runs another command"
 	}
-	if args, ok := container["args"].([]any); ok && len(args) > 0 {
-		return "its shell container runs another command"
+	for _, field := range []string{"args", "envFrom", "lifecycle", "workingDir", "volumeDevices"} {
+		if value, ok := container[field]; ok && !empty(value) {
+			return "its shell container is configured differently (" + field + ")"
+		}
 	}
+	if !sameEnv(container["env"], shellEnvNames) {
+		return "its shell container has another environment"
+	}
+
 	want := map[string]string{"home": HomeDir, "tmp": "/tmp"}
 	mounts, _ := container["volumeMounts"].([]any)
 	if len(mounts) != len(want) {
@@ -593,9 +590,76 @@ func foreignShellContainer(container map[string]any) string {
 		if expected, ok := want[name]; !ok || path != expected {
 			return "its shell container mounts something else"
 		}
+		if sub, _ := mount["subPath"].(string); sub != "" {
+			return "its shell container mounts something else"
+		}
 		delete(want, name)
 	}
+
+	security, _ := container["securityContext"].(map[string]any)
+	if privileged, _ := security["privileged"].(bool); privileged {
+		return "its shell container is privileged"
+	}
+	if escalation, ok := security["allowPrivilegeEscalation"].(bool); !ok || escalation {
+		return "its shell container may escalate privilege"
+	}
+	if readOnly, ok := security["readOnlyRootFilesystem"].(bool); !ok || !readOnly {
+		return "its shell container has a writable root filesystem"
+	}
+	if capabilities, _ := security["capabilities"].(map[string]any); capabilities != nil {
+		if add, _ := capabilities["add"].([]any); len(add) > 0 {
+			return "its shell container adds capabilities"
+		}
+	}
 	return ""
+}
+
+// shellEnvNames are the variables PodManifest sets, each to a literal value.
+// KUBEMG_USER's value is the username and is not compared; every one must be
+// a plain value, never read from somewhere else.
+var shellEnvNames = map[string]string{
+	"HOME":        HomeDir,
+	"KUBECONFIG":  KubeconfigPath,
+	"TERM":        "xterm-256color",
+	"KUBEMG_USER": "",
+}
+
+func sameEnv(raw any, want map[string]string) bool {
+	list, _ := raw.([]any)
+	if len(list) != len(want) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, item := range list {
+		variable, _ := item.(map[string]any)
+		name, _ := variable["name"].(string)
+		expected, ok := want[name]
+		if !ok || seen[name] {
+			return false
+		}
+		if _, ok := variable["valueFrom"]; ok {
+			return false
+		}
+		if value, _ := variable["value"].(string); expected != "" && value != expected {
+			return false
+		}
+		seen[name] = true
+	}
+	return true
+}
+
+func empty(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	}
+	return false
 }
 
 // ForeignFor is Foreign with the configured image compared too: a pod running

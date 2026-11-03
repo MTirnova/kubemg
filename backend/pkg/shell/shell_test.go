@@ -210,7 +210,7 @@ func TestReadStatusReadsThePodsOwnAccountOfItself(t *testing.T) {
 			},
 		},
 		"spec": map[string]any{
-			"containers": []any{map[string]any{"image": "ghcr.io/kubemg/kubemg-shell:test"}},
+			"containers": []any{map[string]any{"name": "shell", "image": "ghcr.io/kubemg/kubemg-shell:test"}},
 		},
 		"status": map[string]any{
 			"phase":             "Running",
@@ -422,12 +422,13 @@ func TestReadStatusTellsAForeignPodFromItsOwn(t *testing.T) {
 		t.Fatalf("no pod at all read as foreign: %s", got)
 	}
 
-	// A mesh sidecar that cannot see the home directory changes nothing.
-	sidecar := render()
-	spec := sidecar["spec"].(map[string]any)
-	spec["containers"] = append(spec["containers"].([]any), map[string]any{"name": "istio-proxy", "image": "proxy"})
-	if got := ReadStatus(sidecar).Foreign; got != "" {
-		t.Fatalf("an unrelated sidecar read as foreign: %s", got)
+	// Fields the API server defaults are not compared.
+	defaulted := render()
+	container := defaulted["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["imagePullPolicy"] = "IfNotPresent"
+	container["terminationMessagePath"] = "/dev/termination-log"
+	if got := ReadStatus(defaulted).ForeignFor("shell:1"); got != "" {
+		t.Fatalf("a defaulted field read as foreign: %s", got)
 	}
 
 	cases := map[string]func(spec map[string]any){
@@ -465,6 +466,41 @@ func TestReadStatusTellsAForeignPodFromItsOwn(t *testing.T) {
 			container := spec["containers"].([]any)[0].(map[string]any)
 			container["volumeMounts"] = append(container["volumeMounts"].([]any),
 				map[string]any{"name": "loot", "mountPath": HomeDir + "/.kube"})
+		},
+		"sidecar": func(spec map[string]any) {
+			spec["containers"] = append(spec["containers"].([]any), map[string]any{"name": "istio-proxy", "image": "proxy"})
+		},
+		"sidecar first": func(spec map[string]any) {
+			spec["containers"] = append([]any{map[string]any{"name": "evil", "image": "x"}}, spec["containers"].([]any)...)
+		},
+		"init container": func(spec map[string]any) {
+			spec["initContainers"] = []any{map[string]any{"name": "prep", "image": "x"}}
+		},
+		"pvc": func(spec map[string]any) {
+			spec["volumes"] = append(spec["volumes"].([]any), map[string]any{
+				"name": "data", "persistentVolumeClaim": map[string]any{"claimName": "x"},
+			})
+		},
+		"PATH in the environment": func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["env"] = append(container["env"].([]any), map[string]any{"name": "PATH", "value": "/tmp"})
+		},
+		"env from a secret": func(spec map[string]any) {
+			container := spec["containers"].([]any)[0].(map[string]any)
+			container["env"].([]any)[0] = map[string]any{"name": "HOME", "valueFrom": map[string]any{}}
+		},
+		"working dir": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["workingDir"] = "/tmp"
+		},
+		"lifecycle hook": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["lifecycle"] = map[string]any{"postStart": map[string]any{}}
+		},
+		"privileged": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["securityContext"].(map[string]any)["privileged"] = true
+		},
+		"added capability": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["securityContext"].(map[string]any)["capabilities"] =
+				map[string]any{"add": []any{"SYS_ADMIN"}}
 		},
 		"home mounted elsewhere": func(spec map[string]any) {
 			container := spec["containers"].([]any)[0].(map[string]any)

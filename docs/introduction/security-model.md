@@ -128,12 +128,14 @@ it:
   refused below `cluster-admin`, because its answer would carry the agent's
   Secret. Read Secrets one namespace at a time. The console's own Secret list
   is not affected: it shows key names only.
-- A browser shell is only seeded into, and attached to, a pod kubemg
-  rendered. A pod under the shell's name that runs another image or command,
-  another ServiceAccount, a mounted token, shared process or host namespaces, a
-  node path, an ephemeral container, or lets another container see its home
-  directory is replaced; if the replacement still is not kubemg's, the shell
-  refuses rather than writing the credential into it.
+- A browser shell is only seeded into, and attached to, a pod that matches
+  the one kubemg renders: one container running kubemg's image, command and
+  environment, two scratch volumes, kubemg's ServiceAccount with no token, no
+  init or ephemeral container, nothing privileged. Any other pod under the
+  shell's name is replaced; if the replacement still does not match (a mesh
+  that injects sidecars into the agent's namespace is the usual reason), the
+  shell refuses rather than writing the credential into it. Exclude the
+  agent's namespace from sidecar injection.
 - The guarded namespaces are the setting, the boot value and the default
   `kubemg-system`. An agent moved by hand to a namespace none of those name is
   not covered; keep the **Agent namespace** setting pointing where agents run.
