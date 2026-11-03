@@ -249,6 +249,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	if path == "" {
 		path = "/"
 	}
+	delimiter := decodedDelimiter(path)
 	// The in-page terminal authenticates with a query parameter because a
 	// browser cannot set headers on a WebSocket. Strip it here so the session
 	// token reaches neither the target cluster nor the audit trail.
@@ -284,6 +285,11 @@ func (p *Proxy) Handle(c *gin.Context) {
 		return
 	}
 
+	if delimiter != "" {
+		event.RefusedBy = RefusedByKubeMG
+		p.fail(c, &event, http.StatusForbidden, delimiter)
+		return
+	}
 	if allowed, reason := allowedPath(grant, c.Request.Method, parsed, path); !allowed {
 		event.RefusedBy = RefusedByKubeMG
 		p.fail(c, &event, http.StatusForbidden, reason)

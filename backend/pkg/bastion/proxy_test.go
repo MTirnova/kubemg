@@ -88,6 +88,7 @@ func TestAllowedNamespace(t *testing.T) {
 		{"double-encoded slash, scoped", scoped, "/api/v1%2Fnamespaces%2Fkube-system%2Fsecrets", false},
 		{"double-encoded slash, unscoped", unscoped, "/api/v1/namespaces/team-a%2F..%2Fkube-system/secrets", false},
 		{"encoded namespace", unscoped, "/api/v1/namespaces/kubemg%2Dsystem/secrets", false},
+		{"fragment cuts the path", unscoped, "/api/v1/secrets#/x", false},
 		{"dot segments", scoped, "/api/v1/namespaces/team-a/pods/../../kube-system/pods", false},
 		{"empty segment", unscoped, "/api/v1/namespaces//pods", false},
 		{"trailing slash on discovery", scoped, "/apis/", true},
@@ -329,10 +330,21 @@ func TestProxyRefusesADoubleEncodedPath(t *testing.T) {
 			t.Fatalf("%s: want 403, got %d", method, resp.StatusCode)
 		}
 	}
+	// %23 and %3F arrive decoded: forwarded, they would cut the path short or
+	// start the query early at the agent.
+	for _, path := range []string{
+		"/api/v1/namespaces/team-a/pods/x%23/y",
+		"/api/v1/namespaces/team-a/pods%3Fwatch=1",
+	} {
+		resp := h.proxyRequest(http.MethodGet, "/api/v1/clusters/1/proxy"+path, h.token(dev))
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: want 403, got %d", path, resp.StatusCode)
+		}
+	}
 	if got := len(agent.requests()); got != 0 {
 		t.Fatalf("the call must never reach the agent, got %d requests", got)
 	}
-	waitFor(t, func() bool { return len(h.audit.events()) >= 2 })
+	waitFor(t, func() bool { return len(h.audit.events()) >= 4 })
 	for _, event := range h.audit.events() {
 		if event.RefusedBy != RefusedByKubeMG || event.Status != http.StatusForbidden {
 			t.Fatalf("want a refusal by kubemg, got %+v", event)

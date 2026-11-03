@@ -27,6 +27,12 @@ import (
 // node being proxied to, not to the API server's routing, so it is not
 // checked. The segments that address the proxied object still are.
 func ambiguousPath(path string) string {
+	// The agent sends the path as a string it parses again, so a '#' anywhere
+	// in it would start a fragment and silently cut what follows: the
+	// cluster would act on a shorter path than the one checked here.
+	if strings.ContainsRune(path, '#') {
+		return "the path carries a '#', which would cut it short before the API server reads it"
+	}
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path = path[:i]
 	}
@@ -69,4 +75,16 @@ func ambiguousPath(path string) string {
 // kubectl needs it — reading — and no wider.
 func readOnlyMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
+}
+
+// decodedDelimiter reports why a client's path — as the router decoded it,
+// before KubeMG appends the query — cannot be forwarded. A '?' in it arrived
+// as %3F: the agent would read it as the start of the query, so the path the
+// cluster routes on and the query it reads would both differ from what was
+// checked. '#' (from %23) is ambiguousPath's to refuse on every path.
+func decodedDelimiter(path string) string {
+	if strings.ContainsRune(path, '?') {
+		return "the path carries an encoded '?', which the API server would read as the start of the query"
+	}
+	return ""
 }
