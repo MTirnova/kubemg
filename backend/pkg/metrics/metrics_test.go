@@ -230,9 +230,10 @@ func TestMiddlewareSkipsHistogramForFollowParam(t *testing.T) {
 	}
 }
 
-// The API server streams on `1` as much as on `true`, so both spellings stay
-// out of the histogram; a value that leaves streaming off is an ordinary,
-// timed request.
+// The API server streams on any watch or follow value but `0` and `false` in
+// any case, so every spelling it streams on stays out of the histogram; a
+// value that leaves streaming off, or no flag at all, is an ordinary, timed
+// request.
 func TestMiddlewareStreamingFlagSpellings(t *testing.T) {
 	cases := []struct {
 		query    string
@@ -242,11 +243,23 @@ func TestMiddlewareStreamingFlagSpellings(t *testing.T) {
 		{"follow=1", false},
 		{"watch=true", false},
 		{"follow=true", false},
+		{"watch=t", false},
+		{"watch=TRUE", false},
+		{"follow=True", false},
+		{"watch=yes", false},
+		{"watch=", false},
+		{"watch", false},
+		{"follow=", false},
 		{"watch=0", true},
 		{"watch=false", true},
+		{"watch=FALSE", true},
 		{"follow=0", true},
-		{"follow=false", true},
-		{"watch=", true},
+		{"follow=False", true},
+		// The API server reads the first value only.
+		{"watch=0&watch=1", true},
+		{"watch=1&watch=0", false},
+		{"limit=500", true},
+		{"", true},
 	}
 	for _, tc := range cases {
 		m, reg := NewStandalone()
