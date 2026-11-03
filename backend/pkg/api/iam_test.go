@@ -600,6 +600,46 @@ func TestUsernamesKubernetesReadsAsItsOwnAreRefused(t *testing.T) {
 	}
 }
 
+// An admin token outlives the role it was minted with. A demoted or disabled
+// administrator who kept one must not reach an admin route with it — the route
+// reads the account, not the claim.
+func TestAdminRoutesReadTheRoleFromTheAccountNotTheToken(t *testing.T) {
+	env := newTestEnv(t)
+	demoted := env.store.addUser("former-admin", "pw", db.RoleAdmin)
+	disabled := env.store.addUser("disabled-admin", "pw", db.RoleAdmin)
+	staleDemoted := env.tokenFor(t, demoted)
+	staleDisabled := env.tokenFor(t, disabled)
+
+	demoted.SystemRole = db.SystemRoleUser
+	demoted.Normalize()
+	disabled.IsActive = false
+
+	payload := validUserPayload()
+	payload["username"] = "backdoor"
+	payload["system_role"] = db.SystemRoleAdmin
+	for name, token := range map[string]string{"demoted": staleDemoted, "disabled": staleDisabled} {
+		for _, call := range []struct{ method, path string }{
+			{http.MethodPost, "/api/v1/users"},
+			{http.MethodGet, "/api/v1/users"},
+			{http.MethodGet, "/api/v1/settings"},
+		} {
+			rec := env.do(t, call.method, call.path, token, payload)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s %s %s: want 403, got %d (%s)", name, call.method, call.path, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	if _, err := env.store.UserByUsername(context.Background(), "backdoor"); err == nil {
+		t.Fatal("a demoted administrator created an account")
+	}
+
+	// A current administrator still gets through.
+	admin := env.store.addUser("admin", "pw", db.RoleAdmin)
+	if rec := env.do(t, http.MethodGet, "/api/v1/users", env.tokenFor(t, admin), nil); rec.Code != http.StatusOK {
+		t.Fatalf("a current admin: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 // A grant's namespaces are pasted into the PromQL and LogsQL KubeMG writes for
 // a scoped caller, so only real namespace names are stored.
 func TestAssignPermissionRefusesANamespaceThatIsNotOne(t *testing.T) {
