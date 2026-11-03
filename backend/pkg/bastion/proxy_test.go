@@ -351,3 +351,81 @@ func TestProxyRefusesADoubleEncodedPath(t *testing.T) {
 		}
 	}
 }
+
+// Below cluster-admin, nothing reaches the agent's namespace — its Secret, its
+// ServiceAccount and every shell live there — and no kubectl read of every
+// Secret at once, which would carry the agent's. KubeMG's own unsaved service
+// identities manage that namespace and are not refused.
+func TestAgentNamespaceIsRefusedBelowClusterAdmin(t *testing.T) {
+	p := NewProxy(ProxyOptions{AgentNamespaces: []string{"kubemg-system"}})
+	p.SetAgentNamespaces("kubemg-agents", "kubemg-system", "")
+	person := &db.User{ID: 4, Username: "dev"}
+	runner := &db.User{Username: "kubemg:shell-runner"}
+	edit := db.UserClusterAccess{K8sRole: db.K8sRoleEdit}
+	admin := db.UserClusterAccess{K8sRole: db.K8sRoleClusterAdmin}
+
+	for _, path := range []string{
+		"/api/v1/namespaces/kubemg-system/secrets/kubemg-agent",
+		"/api/v1/namespaces/kubemg-agents/pods",
+		"/api/v1/namespaces/kubemg-system/pods/kubemg-shell-1/exec?command=sh",
+		"/api/v1/namespaces/kubemg-system/serviceaccounts/kubemg-agent/token",
+	} {
+		parsed := ParsePath(path)
+		if p.agentNamespaceRefusal(person, edit, parsed) == "" {
+			t.Errorf("%s: an edit grant was let in", path)
+		}
+		if reason := p.agentNamespaceRefusal(person, admin, parsed); reason != "" {
+			t.Errorf("%s: a cluster-admin grant was refused: %s", path, reason)
+		}
+		if reason := p.agentNamespaceRefusal(runner, db.UserClusterAccess{K8sRole: db.K8sRoleView}, parsed); reason != "" {
+			t.Errorf("%s: KubeMG's own runner was refused: %s", path, reason)
+		}
+	}
+	if reason := p.agentNamespaceRefusal(person, edit, ParsePath("/api/v1/namespaces/team-a/secrets")); reason != "" {
+		t.Fatalf("an ordinary namespace was refused: %s", reason)
+	}
+
+	if clusterWideSecretRefusal(person, edit, ParsePath("/api/v1/secrets?watch=1")) == "" {
+		t.Fatal("a cluster-wide Secret read was let through below cluster-admin")
+	}
+	if reason := clusterWideSecretRefusal(person, admin, ParsePath("/api/v1/secrets")); reason != "" {
+		t.Fatalf("a cluster-admin's cluster-wide Secret read was refused: %s", reason)
+	}
+	if reason := clusterWideSecretRefusal(person, edit, ParsePath("/api/v1/pods")); reason != "" {
+		t.Fatalf("a cluster-wide pod read was refused: %s", reason)
+	}
+}
+
+// Through the gateway: kubectl into the agent's namespace is refused by kubemg
+// and recorded, and the agent is never asked.
+func TestProxyRefusesTheAgentNamespaceToAnEditGrant(t *testing.T) {
+	h := newHarness(t)
+	h.proxy.SetAgentNamespaces("kubemg-system")
+	h.addCluster(1, "prod-eu", "kmg_valid")
+	dev := h.addUser(11, "dev", db.SystemRoleUser)
+	h.grant(dev.ID, 1, db.K8sRoleEdit, nil)
+
+	agent, err := h.dialAgent("kmg_valid", okResponse("{}"))
+	if err != nil {
+		t.Fatalf("dial agent: %v", err)
+	}
+	waitFor(t, func() bool { return h.gateway.Registry().Connected(1) })
+
+	for _, path := range []string{
+		"/api/v1/namespaces/kubemg-system/secrets/kubemg-agent",
+		"/api/v1/secrets",
+	} {
+		resp := h.proxyRequest(http.MethodGet, "/api/v1/clusters/1/proxy"+path, h.token(dev))
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: want 403, got %d", path, resp.StatusCode)
+		}
+	}
+	if got := len(agent.requests()); got != 0 {
+		t.Fatalf("the call must never reach the agent, got %d requests", got)
+	}
+
+	resp := h.proxyRequest(http.MethodGet, "/api/v1/clusters/1/proxy/api/v1/namespaces/team-a/secrets", h.token(dev))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("an ordinary namespace: want 200, got %d", resp.StatusCode)
+	}
+}

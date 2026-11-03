@@ -687,8 +687,9 @@ func NewRouter(opts Options) *gin.Engine {
 		go s.startAuditPruner(opts.Background)
 		// What reaches that table is a setting, and the gateway reads it from
 		// memory on every call — so it has to be resolved here and republished.
-		// The rate limit rides the same timer: it is read on every call too.
-		if s.auditPolicy != nil || s.rateLimit != nil {
+		// The rate limit and the agent's namespace ride the same timer: both
+		// are read on every call too.
+		if s.auditPolicy != nil || s.rateLimit != nil || s.proxy != nil {
 			go s.startAuditPolicyRefresher(opts.Background)
 		}
 		// The same handoff for the safety policies. It publishes once before

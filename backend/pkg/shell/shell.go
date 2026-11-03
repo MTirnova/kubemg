@@ -238,7 +238,7 @@ func PodManifest(spec PodSpec) ([]byte, error) {
 					// on the audited path rather than in a process nobody attached
 					// to. `sleep infinity` is deliberately not used: it is a GNU
 					// coreutils spelling and busybox's sleep does not take it.
-					"command": []any{"/bin/sh", "-c", "while :; do sleep 3600; done"},
+					"command": []any{shellCommand[0], shellCommand[1], shellCommand[2]},
 					"env": []any{
 						map[string]any{"name": "HOME", "value": HomeDir},
 						map[string]any{"name": "KUBECONFIG", "value": KubeconfigPath},
@@ -336,6 +336,11 @@ type Status struct {
 	// that will not pull, a deadline that ran out — so the console can say why
 	// rather than spinning.
 	Message string `json:"message,omitempty"`
+	// Foreign names what makes the pod one KubeMG did not render, or is empty
+	// for one it did. The name is derived from the user id and so is
+	// predictable; a pod somebody else put there must never be handed its
+	// owner's kubeconfig. Not serialised: it is a decision, not a display.
+	Foreign string `json:"-"`
 }
 
 // ReadStatus reads a pod object into the shape above. Anything it cannot find is
@@ -371,6 +376,8 @@ func ReadStatus(pod map[string]any) Status {
 			status.Image, _ = first["image"].(string)
 		}
 	}
+
+	status.Foreign = foreignSpec(spec)
 
 	podStatus, _ := pod["status"].(map[string]any)
 	status.Phase, _ = podStatus["phase"].(string)
@@ -495,4 +502,81 @@ func ClampMaxLifetime(d time.Duration) time.Duration {
 		return DefaultMaxLifetime
 	}
 	return d
+}
+
+// shellCommand is the container's command as PodManifest writes it.
+var shellCommand = []string{"/bin/sh", "-c", "while :; do sleep 3600; done"}
+
+// foreignSpec checks the parts of a pod that decide who can read what is
+// written into it: the container the credential is exec'd into must run
+// KubeMG's command under KubeMG's ServiceAccount with no token mounted, and
+// no other container may see its home directory or its processes. Anything
+// the cluster's admission adds beside that — a mesh sidecar, an extra volume
+// — is left alone, because it cannot reach the file. The image is compared
+// by the caller, which knows which one is configured.
+func foreignSpec(spec map[string]any) string {
+	if account, _ := spec["serviceAccountName"].(string); account != ServiceAccount {
+		return "it runs under another service account"
+	}
+	if automount, ok := spec["automountServiceAccountToken"].(bool); !ok || automount {
+		return "it mounts a service account token"
+	}
+	for _, field := range []string{"hostPID", "hostIPC", "hostNetwork", "shareProcessNamespace"} {
+		if on, _ := spec[field].(bool); on {
+			return "it shares " + field + " with something else"
+		}
+	}
+	if volumes, ok := spec["volumes"].([]any); ok {
+		for _, raw := range volumes {
+			volume, _ := raw.(map[string]any)
+			if name, _ := volume["name"].(string); name == "home" {
+				if _, ok := volume["emptyDir"].(map[string]any); !ok {
+					return "its home directory is not an emptyDir"
+				}
+			}
+		}
+	}
+
+	found := false
+	for _, list := range []string{"initContainers", "containers", "ephemeralContainers"} {
+		containers, _ := spec[list].([]any)
+		for _, raw := range containers {
+			container, _ := raw.(map[string]any)
+			name, _ := container["name"].(string)
+			if list == "containers" && name == "shell" {
+				found = true
+				if !sameArgv(container["command"], shellCommand) {
+					return "its shell container runs another command"
+				}
+				if args, ok := container["args"].([]any); ok && len(args) > 0 {
+					return "its shell container runs another command"
+				}
+				continue
+			}
+			mounts, _ := container["volumeMounts"].([]any)
+			for _, rawMount := range mounts {
+				mount, _ := rawMount.(map[string]any)
+				if volume, _ := mount["name"].(string); volume == "home" {
+					return "another container mounts its home directory"
+				}
+			}
+		}
+	}
+	if !found {
+		return "it has no shell container"
+	}
+	return ""
+}
+
+func sameArgv(raw any, want []string) bool {
+	list, ok := raw.([]any)
+	if !ok || len(list) != len(want) {
+		return false
+	}
+	for i, value := range list {
+		if text, _ := value.(string); text != want[i] {
+			return false
+		}
+	}
+	return true
 }

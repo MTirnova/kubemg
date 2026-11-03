@@ -269,7 +269,11 @@ func (s *server) startShell(c *gin.Context) {
 	// A shell that has finished is a record of a terminal, not a terminal. It is
 	// cleared out of the way rather than reported, because the person asking for
 	// one has no use for the remains of the last.
-	if status.Exists && (status.Phase == "Succeeded" || status.Phase == "Failed") {
+	//
+	// So is a pod under the shell's name that KubeMG did not render: the name is
+	// derived from the user id, so anyone able to create pods in the agent's
+	// namespace could have put one there to be handed its owner's kubeconfig.
+	if status.Exists && (status.Phase == "Succeeded" || status.Phase == "Failed" || status.Foreign != "") {
 		if err := s.deleteShellPod(ctx, cluster, config.Namespace, user.ID); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
@@ -314,6 +318,14 @@ func (s *server) startShell(c *gin.Context) {
 		Status:             status,
 	}
 
+	if status.Foreign != "" {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "the pod under this shell's name is not one KubeMG made (" + status.Foreign +
+				"), so no credential is written into it; a cluster administrator should look at " +
+				config.Namespace + "/" + status.Name,
+		})
+		return
+	}
 	if status.Ready {
 		if err := s.seedShellCredential(c, user, cluster, grant, k8sRole, config, status); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
